@@ -271,7 +271,7 @@ xdr_rdma_respond_callback(struct rpc_rdma_cbc *cbc, RDMAXPRT *xprt)
 		__func__, xprt, xprt->state, cbc);
 
 	mutex_lock(&xprt->sm_dr.ioq.ioq_uv.uvqh.qmutex);
-	TAILQ_REMOVE(&xprt->sm_dr.ioq.ioq_uv.uvqh.qh, &cbc->workq.ioq_s, q);
+	TAILQ_REMOVE(&xprt->sm_dr.ioq.ioq_uv.uvqh.active, &cbc->workq.ioq_s, q);
 	(xprt->sm_dr.ioq.ioq_uv.uvqh.qcount)--;
 	mutex_unlock(&xprt->sm_dr.ioq.ioq_uv.uvqh.qmutex);
 
@@ -287,7 +287,7 @@ xdr_rdma_destroy_callback(struct rpc_rdma_cbc *cbc, RDMAXPRT *xprt)
 		__func__, xprt, xprt->state, cbc);
 
 	mutex_lock(&xprt->sm_dr.ioq.ioq_uv.uvqh.qmutex);
-	TAILQ_REMOVE(&xprt->sm_dr.ioq.ioq_uv.uvqh.qh, &cbc->workq.ioq_s, q);
+	TAILQ_REMOVE(&xprt->sm_dr.ioq.ioq_uv.uvqh.active, &cbc->workq.ioq_s, q);
 	(xprt->sm_dr.ioq.ioq_uv.uvqh.qcount)--;
 	mutex_unlock(&xprt->sm_dr.ioq.ioq_uv.uvqh.qmutex);
 
@@ -363,7 +363,7 @@ xdr_rdma_wrap_callback(struct rpc_rdma_cbc *cbc, RDMAXPRT *xprt)
 static int
 xdr_rdma_post_recv_n(RDMAXPRT *xprt, struct rpc_rdma_cbc *cbc, int sge)
 {
-	struct poolq_entry *have = TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh);
+	struct poolq_entry *have = TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active);
 	int i = 0;
 	int ret;
 
@@ -474,7 +474,7 @@ static int
 xdr_rdma_post_send_n(RDMAXPRT *xprt, struct rpc_rdma_cbc *cbc, int sge,
 		     struct xdr_rdma_segment *rs, enum ibv_wr_opcode opcode)
 {
-	struct poolq_entry *have = TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh);
+	struct poolq_entry *have = TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active);
 	uint32_t totalsize = 0;
 	int i = 0;
 	int ret;
@@ -1004,7 +1004,7 @@ xdr_rdma_create(RDMAXPRT *xd)
 		data->v.vio_wrap = (char *)b + xd->sm_dr.recvsz;
 		data->u.uio_p1 = &xd->inbufs.uvqh;
 		data->u.uio_p2 = xd->mr;
-		TAILQ_INSERT_TAIL(&xd->inbufs.uvqh.qh, &data->uvq, q);
+		TAILQ_INSERT_TAIL(&xd->inbufs.uvqh.active, &data->uvq, q);
 
 		b += xd->sm_dr.recvsz;
 	}
@@ -1020,7 +1020,7 @@ xdr_rdma_create(RDMAXPRT *xd)
 		data->v.vio_wrap = (char *)b + xd->sm_dr.sendsz;
 		data->u.uio_p1 = &xd->outbufs.uvqh;
 		data->u.uio_p2 = xd->mr;
-		TAILQ_INSERT_TAIL(&xd->outbufs.uvqh.qh, &data->uvq, q);
+		TAILQ_INSERT_TAIL(&xd->outbufs.uvqh.active, &data->uvq, q);
 
 		b += xd->sm_dr.sendsz;
 	}
@@ -1058,7 +1058,7 @@ xdr_rdma_clnt_reply(XDR *xdrs, u_int32_t xid)
 	}
 	xprt = x_xprt(xdrs);
 
-	work_uv = IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh));
+	work_uv = IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active));
 	rpcrdma_dump_msg(work_uv, "creply head", htonl(xid));
 
 	reply_array = (wl_t *)xdr_rdma_get_reply_array(work_uv->v.vio_head);
@@ -1125,7 +1125,7 @@ xdr_rdma_svc_recv(struct rpc_rdma_cbc *cbc, u_int32_t xid)
 	xdr_ioq_release(&cbc->holdq.ioq_uv.uvqh);
 	xdr_rdma_callq(xprt);
 
-	cbc->call_uv = IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh));
+	cbc->call_uv = IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active));
 	(cbc->call_uv->u.uio_references)++;
 	cbc->call_head = cbc->call_uv->v.vio_head;
 	cmsg = m_(cbc->call_head);
@@ -1168,7 +1168,8 @@ xdr_rdma_svc_recv(struct rpc_rdma_cbc *cbc, u_int32_t xid)
 	xdr_rdma_skip_reply_array((uint32_t **)&cbc->call_data);
 
 	/* swap calling message from workq to holdq */
-	TAILQ_CONCAT(&cbc->holdq.ioq_uv.uvqh.qh, &cbc->workq.ioq_uv.uvqh.qh, q);
+	TAILQ_CONCAT(&cbc->holdq.ioq_uv.uvqh.active,
+			&cbc->workq.ioq_uv.uvqh.active, q);
 	cbc->holdq.ioq_uv.uvqh.qcount = cbc->workq.ioq_uv.uvqh.qcount;
 	cbc->workq.ioq_uv.uvqh.qcount = 0;
 
@@ -1186,14 +1187,14 @@ xdr_rdma_svc_recv(struct rpc_rdma_cbc *cbc, u_int32_t xid)
 					 xdr_rdma_chunk_in);
 
 		xdr_rdma_wait_read_cb(xprt, cbc, k, &rl(cbc->read_chunk)->target);
-		rpcrdma_dump_msg(IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh)),
+		rpcrdma_dump_msg(IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active)),
 				 "call chunk", cmsg->rdma_xid);
 
 		/* concatenate any additional buffers after the calling message,
 		 * faking there is more call data in the calling buffer.
 		 */
-		TAILQ_CONCAT(&cbc->holdq.ioq_uv.uvqh.qh,
-			     &cbc->workq.ioq_uv.uvqh.qh, q);
+		TAILQ_CONCAT(&cbc->holdq.ioq_uv.uvqh.active,
+			     &cbc->workq.ioq_uv.uvqh.active, q);
 		cbc->holdq.ioq_uv.uvqh.qcount += cbc->workq.ioq_uv.uvqh.qcount;
 		cbc->workq.ioq_uv.uvqh.qcount = 0;
 		cbc->read_chunk = (char *)cbc->read_chunk
@@ -1304,7 +1305,7 @@ xdr_rdma_clnt_flushout(struct rpc_rdma_cbc *cbc)
 	struct poolq_entry *have;
 	int i = 0;
 
-	hold_uv = IOQ_(TAILQ_FIRST(&cbc->holdq.ioq_uv.uvqh.qh));
+	hold_uv = IOQ_(TAILQ_FIRST(&cbc->holdq.ioq_uv.uvqh.active));
 	msg = (struct rpc_msg *)(hold_uv->v.vio_head);
 	xdr_tail_update(cbc->workq.xdrs);
 
@@ -1347,7 +1348,7 @@ xdr_rdma_clnt_flushout(struct rpc_rdma_cbc *cbc)
 	w_array->present = htonl(1);
 	w_array->elements = htonl(num_chunks);
 
-	TAILQ_FOREACH(have, &cbc->holdq.ioq_uv.uvqh.qh, q) {
+	TAILQ_FOREACH(have, &cbc->holdq.ioq_uv.uvqh.active, q) {
 		struct xdr_rdma_segment *w_seg =
 			&w_array->entry[i++].target;
 		uint32_t length = ioquv_length(IOQ_(have));
@@ -1396,11 +1397,12 @@ xdr_rdma_svc_flushout(struct rpc_rdma_cbc *cbc)
 	xprt = x_xprt(cbc->workq.xdrs);
 
 	/* swap reply body from holdq to workq */
-	TAILQ_CONCAT(&cbc->workq.ioq_uv.uvqh.qh, &cbc->holdq.ioq_uv.uvqh.qh, q);
+	TAILQ_CONCAT(&cbc->workq.ioq_uv.uvqh.active,
+			&cbc->holdq.ioq_uv.uvqh.active, q);
 	cbc->workq.ioq_uv.uvqh.qcount = cbc->holdq.ioq_uv.uvqh.qcount;
 	cbc->holdq.ioq_uv.uvqh.qcount = 0;
 
-	work_uv = IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh));
+	work_uv = IOQ_(TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active));
 	msg = (struct rpc_msg *)(work_uv->v.vio_head);
 	/* work_uv->v.vio_tail has been set by xdr_tail_update() */
 
@@ -1504,9 +1506,9 @@ xdr_rdma_svc_flushout(struct rpc_rdma_cbc *cbc)
 
 			while (0 < k--) {
 				struct poolq_entry *have =
-					TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.qh);
+					TAILQ_FIRST(&cbc->workq.ioq_uv.uvqh.active);
 
-				TAILQ_REMOVE(&cbc->workq.ioq_uv.uvqh.qh, have, q);
+				TAILQ_REMOVE(&cbc->workq.ioq_uv.uvqh.active, have, q);
 				(cbc->workq.ioq_uv.uvqh.qcount)--;
 
 				rpcrdma_dump_msg(IOQ_(have), "sreply body",
@@ -1522,10 +1524,10 @@ xdr_rdma_svc_flushout(struct rpc_rdma_cbc *cbc)
 	}
 
 	/* actual send, callback will take care of cleanup */
-	TAILQ_REMOVE(&cbc->holdq.ioq_uv.uvqh.qh, &head_uv->uvq, q);
+	TAILQ_REMOVE(&cbc->holdq.ioq_uv.uvqh.active, &head_uv->uvq, q);
 	(cbc->holdq.ioq_uv.uvqh.qcount)--;
 	(cbc->workq.ioq_uv.uvqh.qcount)++;
-	TAILQ_INSERT_HEAD(&cbc->workq.ioq_uv.uvqh.qh, &head_uv->uvq, q);
+	TAILQ_INSERT_HEAD(&cbc->workq.ioq_uv.uvqh.active, &head_uv->uvq, q);
 	xdr_rdma_post_send_cb(xprt, cbc, cbc->workq.ioq_uv.uvqh.qcount);
 
 	/* free the old inbuf we only kept for header */

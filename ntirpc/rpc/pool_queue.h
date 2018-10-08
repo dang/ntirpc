@@ -50,8 +50,11 @@ struct poolq_entry {
 	uint16_t qflags;
 };
 
+TAILQ_HEAD(poolq_head_s, poolq_entry);
+
 struct poolq_head {
-	TAILQ_HEAD(poolq_head_s, poolq_entry) qh;
+	struct poolq_head_s active;
+	struct poolq_head_s blocked;
 	pthread_mutex_t qmutex;
 
 	u_int qsize;			/* default size of q entries,
@@ -69,7 +72,8 @@ poolq_head_destroy(struct poolq_head *qh)
 static inline void
 poolq_head_setup(struct poolq_head *qh)
 {
-	TAILQ_INIT(&qh->qh);
+	TAILQ_INIT(&qh->active);
+	TAILQ_INIT(&qh->blocked);
 	pthread_mutex_init(&qh->qmutex, NULL);
 	qh->qcount = 0;
 }

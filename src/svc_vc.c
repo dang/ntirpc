@@ -662,12 +662,12 @@ svc_vc_recv(SVCXPRT *xprt)
 	/* no need for locking, only one svc_rqst_xprt_task() per event.
 	 * depends upon svc_rqst_rearm_events() for ordering.
 	 */
-	have = TAILQ_LAST(&rec->ioq.ioq_uv.uvqh.qh, poolq_head_s);
+	have = TAILQ_LAST(&rec->ioq.ioq_uv.uvqh.active, poolq_head_s);
 	if (!have) {
 		xioq = xdr_ioq_create(xd->sx_dr.pagesz, xd->sx_dr.maxrec,
 				      UIO_FLAG_BUFQ);
 		(rec->ioq.ioq_uv.uvqh.qcount)++;
-		TAILQ_INSERT_TAIL(&rec->ioq.ioq_uv.uvqh.qh, &xioq->ioq_s, q);
+		TAILQ_INSERT_TAIL(&rec->ioq.ioq_uv.uvqh.active, &xioq->ioq_s, q);
 	} else {
 		xioq = _IOQ(have);
 	}
@@ -726,9 +726,9 @@ svc_vc_recv(SVCXPRT *xprt)
 		/* one buffer per fragment */
 		uv = xdr_ioq_uv_create(xd->sx_fbtbc, flags);
 		(xioq->ioq_uv.uvqh.qcount)++;
-		TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.qh, &uv->uvq, q);
+		TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.active, &uv->uvq, q);
 	} else {
-		uv = IOQ_(TAILQ_LAST(&xioq->ioq_uv.uvqh.qh, poolq_head_s));
+		uv = IOQ_(TAILQ_LAST(&xioq->ioq_uv.uvqh.active, poolq_head_s));
 		flags = uv->u.uio_flags;
 	}
 
@@ -783,7 +783,7 @@ svc_vc_recv(SVCXPRT *xprt)
 
 	/* finished a request */
 	(rec->ioq.ioq_uv.uvqh.qcount)--;
-	TAILQ_REMOVE(&rec->ioq.ioq_uv.uvqh.qh, &xioq->ioq_s, q);
+	TAILQ_REMOVE(&rec->ioq.ioq_uv.uvqh.active, &xioq->ioq_s, q);
 	xdr_ioq_reset(xioq, 0);
 
 	if (unlikely(svc_rqst_rearm_events(xprt))) {

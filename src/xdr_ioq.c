@@ -99,8 +99,8 @@ xdr_ioq_uv_fetch(struct xdr_ioq *xioq, struct poolq_head *ioqh,
 	while (count--) {
 		if (likely(0 < ioqh->qcount--)) {
 			/* positive for buffer(s) */
-			have = TAILQ_FIRST(&ioqh->qh);
-			TAILQ_REMOVE(&ioqh->qh, have, q);
+			have = TAILQ_FIRST(&ioqh->active);
+			TAILQ_REMOVE(&ioqh->active, have, q);
 
 			/* added directly to the queue.
 			 * this lock is needed for context header queues,
@@ -108,7 +108,7 @@ xdr_ioq_uv_fetch(struct xdr_ioq *xioq, struct poolq_head *ioqh,
 			 */
 			pthread_mutex_lock(&xioq->ioq_uv.uvqh.qmutex);
 			(xioq->ioq_uv.uvqh.qcount)++;
-			TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.qh, have, q);
+			TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.active, have, q);
 			pthread_mutex_unlock(&xioq->ioq_uv.uvqh.qmutex);
 		} else {
 			u_int saved = xioq->xdrs[0].x_handy;
@@ -117,7 +117,7 @@ xdr_ioq_uv_fetch(struct xdr_ioq *xioq, struct poolq_head *ioqh,
 			 * use the otherwise empty pool to hold them,
 			 * simplifying mutex and pointer setup.
 			 */
-			TAILQ_INSERT_TAIL(&ioqh->qh, &xioq->ioq_s, q);
+			TAILQ_INSERT_TAIL(&ioqh->active, &xioq->ioq_s, q);
 
 			__warnx(TIRPC_DEBUG_FLAG_XDR,
 				"%s() waiting for %u %s",
@@ -136,7 +136,7 @@ xdr_ioq_uv_fetch(struct xdr_ioq *xioq, struct poolq_head *ioqh,
 			xioq->xdrs[0].x_handy = saved;
 
 			/* entry was already added directly to the queue */
-			have = TAILQ_LAST(&xioq->ioq_uv.uvqh.qh, poolq_head_s);
+			have = TAILQ_LAST(&xioq->ioq_uv.uvqh.active, poolq_head_s);
 		}
 	}
 
@@ -158,16 +158,16 @@ xdr_ioq_uv_recycle(struct poolq_head *ioqh, struct poolq_entry *have)
 
 	if (likely(0 <= ioqh->qcount++)) {
 		/* positive for buffer(s) */
-		TAILQ_INSERT_TAIL(&ioqh->qh, have, q);
+		TAILQ_INSERT_TAIL(&ioqh->active, have, q);
 	} else {
 		/* negative for waiting worker(s) */
-		struct xdr_ioq *wait = _IOQ(TAILQ_FIRST(&ioqh->qh));
+		struct xdr_ioq *wait = _IOQ(TAILQ_FIRST(&ioqh->active));
 
 		/* added directly to the queue.
 		 * no need to lock here, the mutex is the pool _head.
 		 */
 		(wait->ioq_uv.uvqh.qcount)++;
-		TAILQ_INSERT_TAIL(&wait->ioq_uv.uvqh.qh, have, q);
+		TAILQ_INSERT_TAIL(&wait->ioq_uv.uvqh.active, have, q);
 
 		/* Nota Bene: x_handy was decremented count,
 		 * will be zero for last one needed,
@@ -177,7 +177,7 @@ xdr_ioq_uv_recycle(struct poolq_head *ioqh, struct poolq_entry *have)
 			/* not removed */
 			ioqh->qcount--;
 		} else {
-			TAILQ_REMOVE(&ioqh->qh, &wait->ioq_s, q);
+			TAILQ_REMOVE(&ioqh->active, &wait->ioq_s, q);
 			pthread_cond_signal(&wait->ioq_cond);
 		}
 	}
@@ -243,7 +243,7 @@ xdr_ioq_uv_update(struct xdr_ioq *xioq, struct xdr_ioq_uv *uv)
 void
 xdr_ioq_reset(struct xdr_ioq *xioq, u_int wh_pos)
 {
-	struct xdr_ioq_uv *uv = IOQ_(TAILQ_FIRST(&xioq->ioq_uv.uvqh.qh));
+	struct xdr_ioq_uv *uv = IOQ_(TAILQ_FIRST(&xioq->ioq_uv.uvqh.active));
 
 	xioq->ioq_uv.plength =
 	xioq->ioq_uv.pcount = 0;
@@ -300,7 +300,7 @@ xdr_ioq_create(size_t min_bsize, size_t max_bsize, u_int uio_flags)
 	if (!(uio_flags & UIO_FLAG_BUFQ)) {
 		struct xdr_ioq_uv *uv = xdr_ioq_uv_create(min_bsize, uio_flags);
 		xioq->ioq_uv.uvqh.qcount = 1;
-		TAILQ_INSERT_HEAD(&xioq->ioq_uv.uvqh.qh, &uv->uvq, q);
+		TAILQ_INSERT_HEAD(&xioq->ioq_uv.uvqh.active, &uv->uvq, q);
 		xdr_ioq_reset(xioq, 0);
 	}
 
@@ -379,12 +379,12 @@ xdr_ioq_uv_append(struct xdr_ioq *xioq, u_int ioq_flags)
 		}
 		uv = xdr_ioq_uv_create(xioq->ioq_uv.min_bsize, UIO_FLAG_FREE);
 		(xioq->ioq_uv.uvqh.qcount)++;
-		TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.qh, &uv->uvq, q);
+		TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.active, &uv->uvq, q);
 	} else {
 		/* XXX empty buffer slot (not supported for now) */
 		uv = xdr_ioq_uv_create(0, UIO_FLAG_NONE);
 		(xioq->ioq_uv.uvqh.qcount)++;
-		TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.qh, &uv->uvq, q);
+		TAILQ_INSERT_TAIL(&xioq->ioq_uv.uvqh.active, &uv->uvq, q);
 	}
 
 	xdr_ioq_uv_update(xioq, uv);
@@ -662,7 +662,7 @@ xdr_ioq_setpos(XDR *xdrs, u_int pos)
 	XIOQ(xdrs)->ioq_uv.plength =
 	XIOQ(xdrs)->ioq_uv.pcount = 0;
 
-	TAILQ_FOREACH(have, &(XIOQ(xdrs)->ioq_uv.uvqh.qh), q) {
+	TAILQ_FOREACH(have, &(XIOQ(xdrs)->ioq_uv.uvqh.active), q) {
 		struct xdr_ioq_uv *uv = IOQ_(have);
 		u_int len = ioquv_length(uv);
 		u_int full = (uintptr_t)xdrs->x_v.vio_wrap
@@ -688,13 +688,13 @@ xdr_ioq_setpos(XDR *xdrs, u_int pos)
 void
 xdr_ioq_release(struct poolq_head *ioqh)
 {
-	struct poolq_entry *have = TAILQ_FIRST(&ioqh->qh);
+	struct poolq_entry *have = TAILQ_FIRST(&ioqh->active);
 
 	/* release queued buffers */
 	while (have) {
 		struct poolq_entry *next = TAILQ_NEXT(have, q);
 
-		TAILQ_REMOVE(&ioqh->qh, have, q);
+		TAILQ_REMOVE(&ioqh->active, have, q);
 		(ioqh->qcount)--;
 
 		if (have->qflags & IOQ_FLAG_SEGMENT) {
@@ -737,12 +737,12 @@ xdr_ioq_destroy_internal(XDR *xdrs)
 void
 xdr_ioq_destroy_pool(struct poolq_head *ioqh)
 {
-	struct poolq_entry *have = TAILQ_FIRST(&ioqh->qh);
+	struct poolq_entry *have = TAILQ_FIRST(&ioqh->active);
 
 	while (have) {
 		struct poolq_entry *next = TAILQ_NEXT(have, q);
 
-		TAILQ_REMOVE(&ioqh->qh, have, q);
+		TAILQ_REMOVE(&ioqh->active, have, q);
 		(ioqh->qcount)--;
 
 		_IOQ(have)->ioq_pool = NULL;

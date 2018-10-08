@@ -185,8 +185,8 @@ work_pool_thread(void *arg)
 
 		if (0 > pool->pqh.qcount++) {
 			/* negative for task(s) */
-			have = TAILQ_FIRST(&pool->pqh.qh);
-			TAILQ_REMOVE(&pool->pqh.qh, have, q);
+			have = TAILQ_FIRST(&pool->pqh.active);
+			TAILQ_REMOVE(&pool->pqh.active, have, q);
 
 			wpt->work = (struct work_pool_entry *)have;
 			continue;
@@ -196,7 +196,7 @@ work_pool_thread(void *arg)
 		 * use the otherwise empty pool to hold them,
 		 * simplifying mutex and pointer setup.
 		 */
-		TAILQ_INSERT_TAIL(&pool->pqh.qh, &wpt->pqe, q);
+		TAILQ_INSERT_TAIL(&pool->pqh.active, &wpt->pqe, q);
 
 		__warnx(TIRPC_DEBUG_FLAG_WORKER,
 			"%s() %s waiting",
@@ -219,7 +219,7 @@ work_pool_thread(void *arg)
 			 * Then, has already been removed there.
 			 */
 			pool->pqh.qcount--;
-			TAILQ_REMOVE(&pool->pqh.qh, &wpt->pqe, q);
+			TAILQ_REMOVE(&pool->pqh.active, &wpt->pqe, q);
 		}
 		if (rc && rc != ETIMEDOUT) {
 			__warnx(TIRPC_DEBUG_FLAG_ERROR,
@@ -274,10 +274,10 @@ work_pool_submit(struct work_pool *pool, struct work_pool_entry *work)
 
 	if (0 < pool->pqh.qcount--) {
 		struct work_pool_thread *wpt = (struct work_pool_thread *)
-			TAILQ_FIRST(&pool->pqh.qh);
+			TAILQ_FIRST(&pool->pqh.active);
 
 		/* positive for waiting worker(s) */
-		TAILQ_REMOVE(&pool->pqh.qh, &wpt->pqe, q);
+		TAILQ_REMOVE(&pool->pqh.active, &wpt->pqe, q);
 		wpt->work = work;
 
 		/* Note: the mutex is the pool _head,
@@ -287,7 +287,7 @@ work_pool_submit(struct work_pool *pool, struct work_pool_entry *work)
 		pthread_cond_signal(&wpt->pqcond);
 	} else {
 		/* negative for task(s) */
-		TAILQ_INSERT_TAIL(&pool->pqh.qh, &work->pqe, q);
+		TAILQ_INSERT_TAIL(&pool->pqh.active, &work->pqe, q);
 	}
 
 	pthread_mutex_unlock(&pool->pqh.qmutex);

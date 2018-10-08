@@ -109,7 +109,8 @@ svc_ioq_init(void)
 	ioq_ifqh = mem_calloc(num_send_queues, sizeof(struct poolq_head));
 	for (i = 0, ifph = &ioq_ifqh[0]; i < num_send_queues; ifph++, i++) {
 		ifph->qcount = 0;
-		TAILQ_INIT(&ifph->qh);
+		TAILQ_INIT(&ifph->active);
+		TAILQ_INIT(&ifph->blocked);
 		mutex_init(&ifph->qmutex, NULL);
 	}
 }
@@ -117,10 +118,11 @@ svc_ioq_init(void)
 #define LAST_FRAG ((u_int32_t)(1 << 31))
 #define MAXALLOCA (256)
 
-static inline void
+static inline bool
 svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 {
-	struct iovec *iov, *tiov, *wiov;
+	struct msghdr msg;
+	struct iovec *iov, *tiov;
 	struct poolq_entry *have;
 	struct xdr_ioq_uv *data;
 	ssize_t result;
@@ -130,19 +132,22 @@ svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 	u_int32_t vsize = (xioq->ioq_uv.uvqh.qcount + 1) * sizeof(struct iovec);
 	int iw = 0;
 	int ix = 1;
+	bool ret = false;
+
+	memset(&msg, 0, sizeof(msg));
 
 	if (unlikely(vsize > MAXALLOCA)) {
 		iov = mem_alloc(vsize);
 	} else {
 		iov = alloca(vsize);
 	}
-	wiov = iov; /* position at initial fragment header */
+	msg.msg_iov = iov; /* position at initial fragment header */
 
 	/* update the most recent data length, just in case */
 	xdr_tail_update(xioq->xdrs);
 
 	/* build list after initial fragment header (ix = 1 above) */
-	TAILQ_FOREACH(have, &(xioq->ioq_uv.uvqh.qh), q) {
+	TAILQ_FOREACH(have, &(xioq->ioq_uv.uvqh.active), q) {
 		data = IOQ_(have);
 		tiov = iov + ix;
 		tiov->iov_base = data->v.vio_head;
@@ -155,7 +160,7 @@ svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 		if (iw == 0) {
 			/* new fragment header, determine last iov */
 			fbytes = 0;
-			for (tiov = &wiov[++iw];
+			for (tiov = &msg.msg_iov[++iw];
 			     (tiov < &iov[ix]) && (iw < __svc_maxiov);
 			     ++tiov, ++iw) {
 				fbytes += tiov->iov_len;
@@ -169,43 +174,50 @@ svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 			} /* for */
 
 			/* fragment length doesn't include fragment header */
-			if (&wiov[iw] < &iov[ix]) {
+			if (&msg.msg_iov[iw] < &iov[ix]) {
 				frag_header = htonl((u_int32_t) (fbytes));
 			} else {
 				frag_header = htonl((u_int32_t) (fbytes | LAST_FRAG));
 			}
-			wiov->iov_base = &(frag_header);
-			wiov->iov_len = sizeof(u_int32_t);
+			msg.msg_iov->iov_base = &(frag_header);
+			msg.msg_iov->iov_len = sizeof(u_int32_t);
 
 			/* writev return includes fragment header */
 			remaining += sizeof(u_int32_t);
 			fbytes += sizeof(u_int32_t);
 		}
 
+		msg.msg_iovlen = iw;
 		/* blocking write */
-		result = writev(xprt->xp_fd, wiov, iw);
+		result = sendmsg(xprt->xp_fd, &msg, 0);
 		remaining -= result;
 
 		if (result == fbytes) {
-			wiov += iw - 1;
+			msg.msg_iov += iw - 1;
 			iw = 0;
 			continue;
 		}
 		if (unlikely(result < 0)) {
+			int error = errno;
+
 			__warnx(TIRPC_DEBUG_FLAG_ERROR,
 				"%s() writev failed (%d)\n",
-				__func__, errno);
+				__func__, error);
+			if (error == EWOULDBLOCK || error == EAGAIN) {
+				/* Socket buffer full; don't destroy */
+				ret = true;
+			}
 			SVC_DESTROY(xprt);
 			break;
 		}
 		fbytes -= result;
 
 		/* rare? writev underrun? (assume never overrun) */
-		for (tiov = wiov; iw > 0; ++tiov, --iw) {
+		for (tiov = msg.msg_iov; iw > 0; ++tiov, --iw) {
 			if (tiov->iov_len > result) {
 				tiov->iov_len -= result;
 				tiov->iov_base += result;
-				wiov = tiov;
+				msg.msg_iov = tiov;
 				break;
 			} else {
 				result -= tiov->iov_len;
@@ -216,29 +228,43 @@ svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 	if (unlikely(vsize > MAXALLOCA)) {
 		mem_free(iov, vsize);
 	}
+
+	return ret;
 }
 
 static void
 svc_ioq_write(SVCXPRT *xprt, struct xdr_ioq *xioq, struct poolq_head *ifph)
 {
 	struct poolq_entry *have;
+	bool wouldblock;
 
 	for (;;) {
+		wouldblock = false;
+
 		/* do i/o unlocked */
 		if (svc_work_pool.params.thrd_max
 		 && !(xprt->xp_flags & SVC_XPRT_FLAG_DESTROYED)) {
 			/* all systems are go! */
-			svc_ioq_flushv(xprt, xioq);
+			wouldblock = svc_ioq_flushv(xprt, xioq);
 		}
-		SVC_RELEASE(xprt, SVC_RELEASE_FLAG_NONE);
-		XDR_DESTROY(xioq->xdrs);
+
+		if (!wouldblock) {
+			SVC_RELEASE(xprt, SVC_RELEASE_FLAG_NONE);
+			XDR_DESTROY(xioq->xdrs);
+		}
 
 		mutex_lock(&ifph->qmutex);
-		if (--(ifph->qcount) == 0)
-			break;
 
-		have = TAILQ_FIRST(&ifph->qh);
-		TAILQ_REMOVE(&ifph->qh, have, q);
+		if (wouldblock) {
+			/* Put this on the blocked queue */
+			TAILQ_INSERT_TAIL(&ifph->blocked, &(xioq->ioq_s), q);
+		} else if (--(ifph->qcount) == 0) {
+			break;
+		}
+
+		/* Grap next one */
+		have = TAILQ_FIRST(&ifph->active);
+		TAILQ_REMOVE(&ifph->active, have, q);
 		mutex_unlock(&ifph->qmutex);
 
 		xioq = _IOQ(have);
@@ -267,7 +293,7 @@ svc_ioq_write_now(SVCXPRT *xprt, struct xdr_ioq *xioq)
 
 	if ((ifph->qcount)++ > 0) {
 		/* queue additional output requests without task switch */
-		TAILQ_INSERT_TAIL(&ifph->qh, &(xioq->ioq_s), q);
+		TAILQ_INSERT_TAIL(&ifph->active, &(xioq->ioq_s), q);
 		mutex_unlock(&ifph->qmutex);
 		return;
 	}
@@ -298,7 +324,7 @@ svc_ioq_write_submit(SVCXPRT *xprt, struct xdr_ioq *xioq)
 		/* queue additional output requests, they will be handled by
 		 * existing thread without another task switch.
 		 */
-		TAILQ_INSERT_TAIL(&ifph->qh, &(xioq->ioq_s), q);
+		TAILQ_INSERT_TAIL(&ifph->active, &(xioq->ioq_s), q);
 		mutex_unlock(&ifph->qmutex);
 		return;
 	}
