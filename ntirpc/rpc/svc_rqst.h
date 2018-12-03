@@ -54,6 +54,7 @@
 #define SVC_RQST_FLAG_XPRT_UREG		SVC_XPRT_FLAG_UREG
 #define SVC_RQST_FLAG_CHAN_AFFINITY	0x1000 /* bind conn to parent chan */
 #define SVC_RQST_FLAG_MASK (SVC_RQST_FLAG_CHAN_AFFINITY)
+#define SVC_RQST_FLAG_FLOATING		0x2000 /* Floating rqst */
 
 /* uint32_t instructions */
 #define SVC_RQST_FLAG_LOCKED		SVC_XPRT_FLAG_LOCKED

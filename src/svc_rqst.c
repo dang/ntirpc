@@ -49,6 +49,7 @@
 #include "clnt_internal.h"
 #include "svc_internal.h"
 #include "svc_xprt.h"
+#include "svc_ioq.h"
 
 /**
  * @file svc_rqst.c
@@ -102,6 +103,7 @@ struct svc_rqst_rec {
 
 	int32_t ev_refcnt;
 	uint16_t ev_flags;
+	struct xdr_ioq *xioq; /* IOQ for floating sr_rec */
 };
 
 struct svc_rqst_set {
@@ -171,6 +173,62 @@ svc_rqst_init(uint32_t channels)
 
  unlock:
 	mutex_unlock(&svc_rqst_set.mtx);
+}
+
+static inline int svc_rqst_init_ev_type(struct svc_rqst_rec *sr_rec)
+{
+	sr_rec->ev_type = SVC_EVENT_EPOLL;
+
+	/* XXX improve this too */
+	sr_rec->ev_u.epoll.max_events =
+		__svc_params->ev_u.evchan.max_events;
+	sr_rec->ev_u.epoll.events = (struct epoll_event *)
+		mem_alloc(sr_rec->ev_u.epoll.max_events *
+			  sizeof(struct epoll_event));
+
+	/* create epoll fd */
+	sr_rec->ev_u.epoll.epoll_fd =
+		epoll_create_wr(sr_rec->ev_u.epoll.max_events,
+				EPOLL_CLOEXEC);
+
+	if (sr_rec->ev_u.epoll.epoll_fd == -1) {
+		__warnx(TIRPC_DEBUG_FLAG_ERROR,
+			"%s: epoll_create failed (%d)", __func__,
+			errno);
+		mem_free(sr_rec->ev_u.epoll.events,
+			 sr_rec->ev_u.epoll.max_events *
+			 sizeof(struct epoll_event));
+		return (EINVAL);
+	}
+
+	return 0;
+}
+
+/**
+ * @brief Create a floating svc_rqst_rec
+ *
+ * Sending non-blocking data requires a svc_rqst_rec, but can't use the same
+ * ones that are used for receiving.  This will create a floating one.
+ *
+ * @param[in] parm	Parameter description
+ * @return New svc_rqst_rec on success, NULL on failure
+ */
+static inline struct svc_rqst_rec *svc_rqst_get_floating(void)
+{
+	struct svc_rqst_rec *sr_rec;
+	int code;
+
+	sr_rec = mem_zalloc(sizeof(struct svc_rqst_rec));
+	atomic_inc_int32_t(&sr_rec->ev_refcnt);
+	sr_rec->ev_flags = SVC_RQST_FLAG_FLOATING;
+
+	code = svc_rqst_init_ev_type(sr_rec);
+	if (code != 0) {
+		mem_free(sr_rec, sizeof(*sr_rec));
+		return (NULL);
+	}
+
+	return (sr_rec);
 }
 
 /**
@@ -325,27 +383,8 @@ svc_rqst_new_evchan(uint32_t *chan_id /* OUT */, void *u_data, uint32_t flags)
 
 #if defined(TIRPC_EPOLL)
 	if (flags & SVC_RQST_FLAG_EPOLL) {
-		sr_rec->ev_type = SVC_EVENT_EPOLL;
-
-		/* XXX improve this too */
-		sr_rec->ev_u.epoll.max_events =
-		    __svc_params->ev_u.evchan.max_events;
-		sr_rec->ev_u.epoll.events = (struct epoll_event *)
-		    mem_alloc(sr_rec->ev_u.epoll.max_events *
-			      sizeof(struct epoll_event));
-
-		/* create epoll fd */
-		sr_rec->ev_u.epoll.epoll_fd =
-		    epoll_create_wr(sr_rec->ev_u.epoll.max_events,
-				    EPOLL_CLOEXEC);
-
-		if (sr_rec->ev_u.epoll.epoll_fd == -1) {
-			__warnx(TIRPC_DEBUG_FLAG_ERROR,
-				"%s: epoll_create failed (%d)", __func__,
-				errno);
-			mem_free(sr_rec->ev_u.epoll.events,
-				 sr_rec->ev_u.epoll.max_events *
-				 sizeof(struct epoll_event));
+		code = svc_rqst_init_ev_type(sr_rec);
+		if (code != 0) {
 			++(svc_rqst_set.next_id);
 			mutex_unlock(&svc_rqst_set.mtx);
 			return (EINVAL);
@@ -406,6 +445,11 @@ svc_rqst_release(struct svc_rqst_rec *sr_rec)
 		sr_rec->sv[0], sr_rec->sv[1]);
 
 	mutex_destroy(&sr_rec->ev_lock);
+
+	if (sr_rec->ev_flags & SVC_RQST_FLAG_FLOATING) {
+		/* Free a floating rqst */
+		mem_free(sr_rec, sizeof(*sr_rec));
+	}
 }
 
 /*
@@ -550,8 +594,15 @@ svc_rqst_hook_events(struct rpc_dplx_rec *rec, struct svc_rqst_rec *sr_rec)
 		/* set up epoll user data */
 		ev->data.ptr = rec;
 
-		/* wait for read events, level triggered, oneshot */
-		ev->events = EPOLLIN | EPOLLONESHOT;
+		/* wait for events, level triggered, oneshot */
+		ev->events = EPOLLONESHOT;
+		if (sr_rec->ev_flags & SVC_RQST_FLAG_FLOATING) {
+			/* Floating is for write */
+			ev->events |= EPOLLOUT;
+		} else {
+			/* Static is for read */
+			ev->events |= EPOLLIN;
+		}
 
 		/* add to epoll vector */
 		code = epoll_ctl(sr_rec->ev_u.epoll.epoll_fd,
@@ -613,6 +664,42 @@ svc_rqst_unreg(struct rpc_dplx_rec *rec, struct svc_rqst_rec *sr_rec)
 	 */
 	rec->ev_p = NULL;
 	svc_rqst_release(sr_rec);
+}
+
+int
+svc_rqst_evchan_write(SVCXPRT *xprt, struct xdr_ioq *xioq)
+{
+	struct rpc_dplx_rec *rec = REC_XPRT(xprt);
+	struct svc_rqst_rec *sr_rec;
+	struct svc_rqst_rec *ev_p;
+	int code;
+
+	sr_rec = svc_rqst_get_floating();
+	if (!sr_rec) {
+		__warnx(TIRPC_DEBUG_FLAG_ERROR,
+			"%s: %p couldn't get floating rqst",
+			__func__, xprt);
+		return (ENOENT);
+	}
+	sr_rec->xioq = xioq;
+
+	rpc_dplx_rli(rec);
+
+	ev_p = (struct svc_rqst_rec *)rec->ev_p;
+	if (ev_p) {
+		svc_rqst_unreg(rec, ev_p);
+	}
+
+	/* assuming success */
+	atomic_set_uint16_t_bits(&xprt->xp_flags, SVC_XPRT_FLAG_ADDED);
+
+	/* link from xprt */
+	rec->ev_p = sr_rec;
+
+	/* register on event channel */
+	code = svc_rqst_hook_events(rec, sr_rec);
+
+	return (code);
 }
 
 /*
@@ -763,8 +850,15 @@ svc_rqst_xprt_task(struct work_pool_entry *wpe)
 		/* (idempotent) xp_flags and xp_refcnt are set atomic.
 		 * xp_refcnt need more than 1 (this task).
 		 */
-		(void)clock_gettime(CLOCK_MONOTONIC_FAST, &(rec->recv.ts));
-		(void)SVC_RECV(&rec->xprt);
+		if (rec->xprt.xp_flags & SVC_XPRT_FLAG_SEND) {
+			struct svc_rqst_rec *sr_rec = rec->ev_p;
+
+			svc_ioq_write_now(&rec->xprt, sr_rec->xioq);
+		} else {
+			(void)clock_gettime(CLOCK_MONOTONIC_FAST,
+					    &(rec->recv.ts));
+			(void)SVC_RECV(&rec->xprt);
+		}
 	}
 
 	/* If tests fail, log non-fatal "WARNING! already destroying!" */
@@ -926,7 +1020,11 @@ svc_rqst_epoll_events(struct svc_rqst_rec *sr_rec, int n_events)
 		if (!rec)
 			continue;
 
-		rec->ioq.ioq_wpe.fun = svc_rqst_xprt_task;
+		if (sr_rec->ev_flags & SVC_RQST_FLAG_FLOATING) {
+			rec->ioq.ioq_wpe.fun = svc_rqst_xprt_task;
+		} else {
+			rec->ioq.ioq_wpe.fun = svc_rqst_xprt_task;
+		}
 		work_pool_submit(&svc_work_pool, &(rec->ioq.ioq_wpe));
 	}
 

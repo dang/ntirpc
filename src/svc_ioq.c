@@ -258,6 +258,8 @@ svc_ioq_write(SVCXPRT *xprt, struct xdr_ioq *xioq, struct poolq_head *ifph)
 		if (wouldblock) {
 			/* Put this on the blocked queue */
 			TAILQ_INSERT_TAIL(&ifph->blocked, &(xioq->ioq_s), q);
+			/* Add to epoll */
+			svc_rqst_evchan_write(xprt, xioq);
 		} else if (--(ifph->qcount) == 0) {
 			break;
 		}
