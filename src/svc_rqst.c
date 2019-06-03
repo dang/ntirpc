@@ -598,7 +598,7 @@ svc_rqst_hook_events(struct rpc_dplx_rec *rec, struct svc_rqst_rec *sr_rec)
 		ev->events = EPOLLONESHOT;
 		if (sr_rec->ev_flags & SVC_RQST_FLAG_FLOATING) {
 			/* Floating is for write */
-			ev->events |= EPOLLOUT;
+			ev->events |= EPOLLOUT | EPOLLET;
 		} else {
 			/* Static is for read */
 			ev->events |= EPOLLIN;
@@ -614,23 +614,27 @@ svc_rqst_hook_events(struct rpc_dplx_rec *rec, struct svc_rqst_rec *sr_rec)
 			__warnx(TIRPC_DEBUG_FLAG_ERROR,
 				"%s: %p fd %d xp_refcnt %" PRId32
 				" sr_rec %p evchan %d ev_refcnt %" PRId32
-				" epoll_fd %d control fd pair (%d:%d) hook failed (%d)",
+				" epoll_fd %d control fd pair (%d:%d) "
+				"direction %s hook failed (%d)",
 				__func__, rec, rec->xprt.xp_fd,
 				rec->xprt.xp_refcnt,
 				sr_rec, sr_rec->id_k, sr_rec->ev_refcnt,
 				sr_rec->ev_u.epoll.epoll_fd,
-				sr_rec->sv[0], sr_rec->sv[1], code);
+				sr_rec->sv[0], sr_rec->sv[1],
+				(ev->events & EPOLLOUT) ? "out" : "in", code);
 		} else {
 			__warnx(TIRPC_DEBUG_FLAG_SVC_RQST |
 				TIRPC_DEBUG_FLAG_REFCNT,
 				"%s: %p fd %d xp_refcnt %" PRId32
 				" sr_rec %p evchan %d ev_refcnt %" PRId32
-				" epoll_fd %d control fd pair (%d:%d) hook",
+				" epoll_fd %d control fd pair (%d:%d) "
+				"direction %s hook",
 				__func__, rec, rec->xprt.xp_fd,
 				rec->xprt.xp_refcnt,
 				sr_rec, sr_rec->id_k, sr_rec->ev_refcnt,
 				sr_rec->ev_u.epoll.epoll_fd,
-				sr_rec->sv[0], sr_rec->sv[1]);
+				sr_rec->sv[0], sr_rec->sv[1],
+				(ev->events & EPOLLOUT) ? "out" : "in");
 		}
 		break;
 	}
@@ -691,7 +695,8 @@ svc_rqst_evchan_write(SVCXPRT *xprt, struct xdr_ioq *xioq)
 	}
 
 	/* assuming success */
-	atomic_set_uint16_t_bits(&xprt->xp_flags, SVC_XPRT_FLAG_ADDED);
+	atomic_set_uint16_t_bits(&xprt->xp_flags, SVC_XPRT_FLAG_ADDED |
+				 SVC_XPRT_FLAG_SEND);
 
 	/* link from xprt */
 	rec->ev_p = sr_rec;

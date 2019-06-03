@@ -189,7 +189,7 @@ svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 
 		msg.msg_iovlen = iw;
 		/* blocking write */
-		result = sendmsg(xprt->xp_fd, &msg, 0);
+		result = sendmsg(xprt->xp_fd, &msg, MSG_DONTWAIT);
 		remaining -= result;
 
 		if (result == fbytes) {
@@ -201,13 +201,14 @@ svc_ioq_flushv(SVCXPRT *xprt, struct xdr_ioq *xioq)
 			int error = errno;
 
 			__warnx(TIRPC_DEBUG_FLAG_ERROR,
-				"%s() writev failed (%d)\n",
+				"%s() writev failed (%d)",
 				__func__, error);
 			if (error == EWOULDBLOCK || error == EAGAIN) {
 				/* Socket buffer full; don't destroy */
 				ret = true;
+			} else {
+				SVC_DESTROY(xprt);
 			}
-			SVC_DESTROY(xprt);
 			break;
 		}
 		fbytes -= result;
@@ -256,13 +257,17 @@ svc_ioq_write(SVCXPRT *xprt, struct xdr_ioq *xioq, struct poolq_head *ifph)
 		mutex_lock(&ifph->qmutex);
 
 		if (wouldblock) {
+			__warnx(TIRPC_DEBUG_FLAG_SVC_VC,
+				"%s: %p fd %d EWOULDBLOCK",
+				__func__, xprt, xprt->xp_fd);
 			/* Put this on the blocked queue */
 			TAILQ_INSERT_TAIL(&ifph->blocked, &(xioq->ioq_s), q);
 			/* Add to epoll */
 			svc_rqst_evchan_write(xprt, xioq);
-		} else if (--(ifph->qcount) == 0) {
-			break;
 		}
+
+		if (--(ifph->qcount) == 0)
+			break;
 
 		/* Grap next one */
 		have = TAILQ_FIRST(&ifph->active);
